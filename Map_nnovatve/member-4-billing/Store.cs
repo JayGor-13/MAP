@@ -5,7 +5,16 @@ namespace Billing;
 public sealed class Store(string connectionString)
 {
     public async Task<MySqlConnection> Open() { var c = new MySqlConnection(connectionString); await c.OpenAsync(); return c; }
-    public async Task Init() { await using var c = await Open(); foreach (var statement in File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "migrations/001_initial.sql")).Split(';', StringSplitOptions.RemoveEmptyEntries)) { await new MySqlCommand(statement, c).ExecuteNonQueryAsync(); } }
+    public async Task Init()
+    {
+        await using var c = await Open();
+        var migration = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "migrations/001_initial.sql"));
+        foreach (var statement in migration.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            await using var command = new MySqlCommand(statement, c);
+            await command.ExecuteNonQueryAsync();
+        }
+    }
     public async Task<T> Locked<T>(string id, Func<Tx, Task<T>> work)
     {
         await using var c = await Open(); await using var t = await c.BeginTransactionAsync(); var tx = new Tx(c, t);

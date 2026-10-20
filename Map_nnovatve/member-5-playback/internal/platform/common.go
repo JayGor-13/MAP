@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +70,7 @@ func Route(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc {
 		if err := fn(w, r); err != nil {
 			var p Problem
 			if !errors.As(err, &p) {
+				log.Printf("request dependency failed: method=%s path=%s error=%T detail=%v", r.Method, r.URL.Path, err, err)
 				p = Problem{503, "Dependency unavailable"}
 			}
 			JSON(w, p.Status, map[string]any{"type": "about:blank", "title": p.Message, "status": p.Status})
@@ -80,7 +83,15 @@ func Call(r *http.Request, method, url string, input any, output any) error {
 		raw, _ := json.Marshal(input)
 		body = bytes.NewReader(raw)
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+	timeout := time.Second
+	if configured := os.Getenv("AUTHORITY_TIMEOUT_MS"); configured != "" {
+		milliseconds, err := strconv.ParseInt(configured, 10, 32)
+		if err != nil || milliseconds <= 0 {
+			return errors.New("AUTHORITY_TIMEOUT_MS must be a positive integer")
+		}
+		timeout = time.Duration(milliseconds) * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {

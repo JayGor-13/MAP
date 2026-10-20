@@ -31,11 +31,19 @@ import java.util.concurrent.TimeUnit;
 
 @Component
 class Store {
-    final JdbcTemplate db; final ObjectMapper json;
+    private final JdbcTemplate db; private final ObjectMapper json;
     Store(JdbcTemplate db,ObjectMapper json){this.db=db;this.json=json;}
     Map<String,Object> decode(String value){try{return json.readValue(value,new TypeReference<>(){});}catch(Exception e){throw new IllegalStateException("Invalid stored JSON",e);}}
     String encode(Object value){try{return json.writeValueAsString(value);}catch(Exception e){throw new IllegalStateException("Cannot encode",e);}}
     Map<String,Object> get(String id){var rows=db.query("SELECT body::text FROM titles WHERE id=?",(r,n)->decode(r.getString(1)),id);if(rows.isEmpty())throw new ResponseStatusException(HttpStatus.NOT_FOUND);return rows.getFirst();}
+    void checkReady(){db.queryForObject("SELECT 1",Integer.class);}
+    List<Map<String,Object>> browse(Map<String,Object> ctx,String q,int limit,int offset){
+        return db.query("SELECT body::text FROM titles WHERE body->>'published'='true' AND body->>'deleted'='false' AND (body->>'maturity')::int<=? AND body->'regions' @> ?::jsonb AND (body->>'licenseStart')::timestamptz<=now() AND (body->>'licenseEnd')::timestamptz>now() AND strpos(lower(body->>'name'),lower(?))>0 ORDER BY id LIMIT ? OFFSET ?",(r,n)->decode(r.getString(1)),ctx.get("maturity"),encode(List.of(ctx.get("region"))),q,limit,offset);
+    }
+    List<Map<String,Object>> pendingEvents(){return db.queryForList("SELECT id,aggregate_id,payload::text FROM outbox WHERE NOT sent ORDER BY created_at LIMIT 50");}
+    void markSent(Object id){db.update("UPDATE outbox SET sent=true WHERE id=?",id);}
+    @Transactional
+    public void project(String payload){var event=decode(payload);var title=event.get("data");var data=decode(encode(title));db.update("INSERT INTO titles(id,version,body) VALUES (?,?,?::jsonb) ON CONFLICT(id) DO UPDATE SET version=excluded.version,body=excluded.body,updated_at=now() WHERE titles.version<excluded.version",data.get("id"),event.get("version"),encode(title));}
     @Transactional
     public Map<String,Object> create(Map<String,Object> body){var value=Policy.validate(body);String id=UUID.randomUUID().toString();value.putAll(Map.of("id",id,"version",1,"published",false,"deleted",false));db.update("INSERT INTO titles(id,version,body) VALUES (?,1,?::jsonb)",id,encode(value));outbox(value);return value;}
     @Transactional
@@ -66,7 +74,7 @@ class Context {
 class Health {
     final Store store;Health(Store store){this.store=store;}
     @GetMapping("/health/live") Object live(){return Map.of("status","ok");}
-    @GetMapping("/health/ready") Object ready(){store.db.queryForObject("SELECT 1",Integer.class);return live();}
+    @GetMapping("/health/ready") Object ready(){store.checkReady();return live();}
 }
 
 @RestController
@@ -88,7 +96,7 @@ class ReadApi {
     final Store store;final Context context;ReadApi(Store store,Context context){this.store=store;this.context=context;}
     @GetMapping({"/catalog/titles","/catalog/search"}) Object browse(@RequestParam(defaultValue="") String q,@RequestParam(defaultValue="20") int limit,@RequestParam(defaultValue="0") int offset,HttpServletRequest req){
         if(limit<1||limit>100||offset<0||offset>10000||q.length()>200)throw new ResponseStatusException(HttpStatus.BAD_REQUEST);var ctx=context.profile(req);
-        var rows=store.db.query("SELECT body::text FROM titles WHERE body->>'published'='true' AND body->>'deleted'='false' AND (body->>'maturity')::int<=? AND body->'regions' @> ?::jsonb AND (body->>'licenseStart')::timestamptz<=now() AND (body->>'licenseEnd')::timestamptz>now() AND strpos(lower(body->>'name'),lower(?))>0 ORDER BY id LIMIT ? OFFSET ?",(r,n)->store.decode(r.getString(1)),ctx.get("maturity"),store.encode(List.of(ctx.get("region"))),q,limit,offset);return Map.of("items",rows);
+        return Map.of("items",store.browse(ctx,q,limit,offset));
     }
     @GetMapping("/catalog/titles/{id}") Object detail(@PathVariable String id,HttpServletRequest req){var ctx=context.profile(req);var title=store.get(id);if(!context.eligible(title,ctx))throw new ResponseStatusException(HttpStatus.NOT_FOUND);return title;}
     @PostMapping("/internal/titles") Object batch(@RequestBody Map<String,List<String>> body,HttpServletRequest req){context.internal(req);var ctx=context.profile(req);var ids=body.get("ids");if(ids==null||ids.size()>100)throw new ResponseStatusException(HttpStatus.BAD_REQUEST);var items=new ArrayList<Map<String,Object>>();for(String id:ids){try{var t=store.get(id);if(context.eligible(t,ctx))items.add(t);}catch(ResponseStatusException e){if(e.getStatusCode().value()!=404)throw e;}}return Map.of("items",items);}
@@ -99,8 +107,8 @@ class ReadApi {
 class Relay {
     final Store store;final KafkaTemplate<String,String> kafka;Relay(Store store,KafkaTemplate<String,String> kafka){this.store=store;this.kafka=kafka;}
     @Scheduled(fixedDelay=500) public void flush() throws Exception {
-        var rows=store.db.queryForList("SELECT id,aggregate_id,payload::text FROM outbox WHERE NOT sent ORDER BY created_at LIMIT 50");
-        for(var row:rows){kafka.send("catalog.title.v1",row.get("aggregate_id").toString(),row.get("payload").toString()).get(5,TimeUnit.SECONDS);store.db.update("UPDATE outbox SET sent=true WHERE id=?",row.get("id"));}
+        var rows=store.pendingEvents();
+        for(var row:rows){kafka.send("catalog.title.v1",row.get("aggregate_id").toString(),row.get("payload").toString()).get(5,TimeUnit.SECONDS);store.markSent(row.get("id"));}
     }
 }
 
@@ -109,8 +117,7 @@ class Relay {
 class Projection {
     final Store store;Projection(Store store){this.store=store;}
     @KafkaListener(topics="catalog.title.v1",groupId="catalog-read-v1")
-    @Transactional
-    public void consume(String payload){var event=store.decode(payload);var title=event.get("data");var data=store.decode(store.encode(title));store.db.update("INSERT INTO titles(id,version,body) VALUES (?,?,?::jsonb) ON CONFLICT(id) DO UPDATE SET version=excluded.version,body=excluded.body,updated_at=now() WHERE titles.version<excluded.version",data.get("id"),event.get("version"),store.encode(title));}
+    public void consume(String payload){store.project(payload);}
 }
 
 @Configuration

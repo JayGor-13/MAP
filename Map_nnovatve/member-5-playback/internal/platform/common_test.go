@@ -1,9 +1,34 @@
 package platform
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+func TestAuthorityTimeoutControlsOutboundCancellation(t *testing.T) {
+	t.Setenv("SERVICE_KEY", "test-key")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+			JSON(w, 200, map[string]bool{"ok": true})
+		}
+	}))
+	defer server.Close()
+	request := httptest.NewRequest("GET", "http://local.invalid/", nil)
+	var result map[string]bool
+	t.Setenv("AUTHORITY_TIMEOUT_MS", "10")
+	if err := Call(request, "GET", server.URL, nil, &result); err == nil {
+		t.Fatal("slow authority ignored the configured deadline")
+	}
+	t.Setenv("AUTHORITY_TIMEOUT_MS", "1000")
+	if err := Call(request, "GET", server.URL, nil, &result); err != nil || !result["ok"] {
+		t.Fatalf("authority did not complete within the longer deadline: %v", err)
+	}
+}
 
 func TestSignatureBindsPathExpiryAndKey(t *testing.T) {
 	now := time.Unix(100, 0)

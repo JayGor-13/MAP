@@ -1,8 +1,52 @@
-# Verification — 2026-10-02
+# Verification
+
+## Live Docker verification — 2026-10-20 (current)
+
+The user explicitly authorized running the newly installed Docker Desktop, superseding the earlier source-only/no-Docker restriction below. Docker Desktop **4.95.0**, Engine **29.8.2**, Linux containers; approximately 7.6 GiB available to Docker. The per-user CLI is under `%LOCALAPPDATA%/Programs/DockerDesktop/resources/bin`; this process's PATH was adjusted to find its credential helper. No machine PATH, credentials, engine settings or data volumes were reset.
+
+| Boundary | Result and evidence |
+|---|---|
+| Registry/builds | Python base image pulled successfully; all eleven application images built. Recommendation `pip check` and runtime imports, including `httpx==0.28.1`, passed inside Linux images. |
+| Infrastructure/startup | All declared infrastructure health checks passed; MongoDB replica-set and Kafka topic initializers exited 0. Full Compose startup completed. |
+| Backend readiness | **11/11** frontend dependency probes returned HTTP 200, including after billing recreation. Snapshot: ignored `.local/docker-verification-status.json`. |
+| Identity/Profile | Real Keycloak discovery/login, profile creation/selection, cross-account rejection and test-profile deletion passed. |
+| Catalog/Watchlist | Admin role rejection, create/publish, stale ETag rejection, Kafka outbox/projection, eligible reads and duplicate watchlist writes passed against real services/stores. |
+| Billing | Native `SELECT 1` succeeded as each database's billing user. Idempotent subscription creation, changed-payload rejection, simulated payment timeout/reconciliation, ACTIVE entitlement, invoices and PDF bytes passed. |
+| Playback/media/history | Session admission and same-key retry, ordered/stale heartbeats, idempotent stop, signed HLS manifest/segments, unsigned URL rejection and Cassandra history dedupe passed. Sample media was generated with the existing FFmpeg tool under ignored `.local/media/`. |
+| Recommendations | Trending returned the eligible synthetic title from the graph; Home excluded it after the watch event. Responses were graph-backed and not degraded. The private recompute API rejected a missing key, persisted a COMPLETE job and published a fresh Redis snapshot. |
+| Existing-schema restart/DNS | Recreated all three billing containers without changing their data volumes. Subscription moved from `172.18.0.26` to `.24`, Payment from `.24` to `.26`; all eleven probes and real gateway/frontend billing reads passed without restarting Kong afterward. |
+| Real frontend HTTP flow | Frontend HTTP 200; actual sign-in proxy, authenticated billing reads, profile CRUD/selection, scoped catalog proxy and synthetic-profile cleanup passed. Tokens/passwords were kept in memory and not printed. |
+| Browser UI | **Not verified in this run.** Two in-app browser attempts could not attach to the webview. No claim of interactive browser/native HLS playback success follows from HTTP/media-byte checks. |
+
+The completed command was `python member-1-platform/tests/smoke.py --check-media`, exit 0. Its final log is ignored `.local/docker-verification-smoke.log`. The synthetic profile/title/subscription were cleaned up/cancelled; sandbox financial history and operational records remain by design. An earlier smoke cleanup failed because an empty DELETE carried a JSON Content-Type; only that run's explicitly identified synthetic profile was subsequently removed. No unrelated profiles were deleted.
+
+Live checks exposed and repaired additional local integration failures:
+
+- Kafka's real API probe succeeded in **42 seconds**, while its original health timeout was 10 seconds. Mongo's `mongosh` probes repeatedly exceeded five seconds. Updated local timeout/grace settings preserve semantic probes instead of substituting open-port checks.
+- Watchlist's 800 ms authority budget produced 503 responses. Configurable Node/Go authority budgets use five seconds in Compose; default budgets outside Compose remain unchanged. Go's actual HTTP cancellation behavior has a regression test.
+- Kong logged connection-refused requests to Playback's obsolete `172.18.0.10` while its recreated container ran at `.27`. Local DNS TTLs now follow recreated services quickly; see [Kong 3.9 configuration](https://raw.githubusercontent.com/Kong/kong/3.9.0/kong.conf.default). The later billing IP-change check passed without a gateway restart.
+- Kong's local worker count is two. Observed memory was roughly **867 MiB before** this limit and **189 MiB in the final snapshot**; these are local observations, not a performance qualification.
+- Strengthened smoke assertions initially expected a watched title in Home; that expectation was wrong for the implemented ranking policy. The corrected completed test checks Trending inclusion and Home exclusion.
+
+Unit/API/build checks across this repair: platform Python **5**, frontend Node **9**, Node personalization **3**, Python recommendations **6**, catalog **4** (including two proxy regressions), billing **5**, Go **4** (including outbound cancellation): **36 passing tests**. Java/Go tests also ran inside image builds. Compose configuration, workspace checks and diff whitespace validation passed. Images, dependencies, logs, keys and runtime data remain ignored; no migrations or lockfiles were changed.
+
+Verified on `codex/member-1/service-startup-recovery`. At the end of verification, the stack was left running at **http://localhost:8090**, gateway **http://localhost:8080**, identity **http://localhost:8081**. These checks establish the synthetic local flow; production, HA/load, real-provider, security/retention and interactive browser qualification remain separate.
+
+## Earlier source-only startup repairs — 2026-10-20
+
+This record supersedes the source-defect status in the October 11 entry. The user authorized changes across affected member folders. Branch: `codex/member-1/service-startup-recovery`. No commit or push was made.
+
+- Billing now trims migration fragments and removes empty entries before MySQL execution. Existing billing tests: **5 passed**; .NET build succeeded. Real MySQL initialization and existing-schema restart remain unverified.
+- Catalog now encapsulates JDBC/JSON fields behind Store methods, including transactional projection. Maven `verify`: **4 tests passed**, including **2 new Spring proxy regression tests**; application packaged successfully. JDBC is mocked in those regressions. PostgreSQL/Kafka integration remains unverified.
+- Recommendation requirements already contain `httpx==0.28.1`. Added image-build `pip check` and imports of all direct runtime modules. Existing recommendation tests: **6 passed**. The new Docker build step and running image were not verified here.
+- Frontend tests: **9 passed**. Platform Python tests: **5 passed**. Workspace checks and Compose `config --quiet` passed. Frontend tests initially failed on sandboxed loopback requests; the same suite passed outside the sandbox. These tests use mock upstreams.
+- Docker initially lacked an engine pipe. Startup logs identified inaccessible stale `dockerInference` and Secrets Engine sockets. Preserved runtime folders as `%LOCALAPPDATA%/Docker/run-backup-20261020-120001`, `run-backup-20261020-120103`, and `%LOCALAPPDATA%/docker-secrets-engine-backup-20261020-120103`. Application volumes, credentials and Docker engine settings were not changed. A previously dispatched final start command returned `Starting Docker Desktop`; no healthy-engine or container result was obtained. The user then directed no further Docker access on this PC, and pending diagnostic commands were cancelled.
+
+**Not executed after the repairs:** image rebuilds, live service probes, MySQL restart checks and the complete cross-service smoke journey. Playback/history unavailability has no service-specific log diagnosis from the supplied screenshots. Follow [service recovery instructions](INTEGRATION_BLOCKERS.md) on the Docker host. No production qualification is claimed.
 
 ## Streaming UI and Markdown API documentation — 2026-10-11
 
-This is the current record; the October 10 console/explorer and Docker limitations below are historical.
+This is the historical October 11 record; the current live repair verification is above.
 
 - Replaced the main developer console with a responsive streaming UI: cinematic hero/original artwork, title cards, search/genre filters, My list, recommendations, History/continue watching, account/profile and membership dialogs, invoices, admin demo publishing and playback controls. Native HLS is browser-dependent; checkpoints run every 25 seconds only while native video plays. External-player/manual progress and session resume controls remain available.
 - API documentation is **API_REFERENCE.md**, with all eleven service addresses, public/private paths, authentication, request examples, health/framework endpoints and manual testing instructions. Removed the `/docs` page and its navigation/explorer. Optional raw OpenAPI JSON remains for API clients.

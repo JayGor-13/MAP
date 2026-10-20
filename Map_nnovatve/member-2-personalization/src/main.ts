@@ -22,6 +22,9 @@ const required = (key: string) => {
   return v;
 };
 const key = required("SERVICE_KEY");
+const authorityTimeoutMs = Number(process.env.AUTHORITY_TIMEOUT_MS ?? 800);
+if (!Number.isInteger(authorityTimeoutMs) || authorityTimeoutMs <= 0)
+  throw new Error("AUTHORITY_TIMEOUT_MS must be a positive integer");
 const issuer = required("JWT_ISSUER");
 const accessKeys = createRemoteJWKSet(new URL(required("JWT_JWKS_URL")));
 const pctKeys = createLocalJWKSet(
@@ -116,9 +119,10 @@ async function context(req: FastifyRequest) {
         "x-profile-token": String(req.headers["x-profile-token"] ?? ""),
         "x-service-key": key,
       },
-      signal: AbortSignal.timeout(800),
+      signal: AbortSignal.timeout(authorityTimeoutMs),
     });
-  } catch {
+  } catch (error) {
+    req.log.warn({ dependency: "profile", errorName: error instanceof Error ? error.name : "Unknown" }, "Authority request failed");
     throw new Problem(503, "Profile authority unavailable");
   }
   if (!response.ok)
@@ -418,12 +422,16 @@ if (service === "profile") {
           "x-service-key": key,
         },
         body: JSON.stringify({ ids: [titleId] }),
-        signal: AbortSignal.timeout(800),
+        signal: AbortSignal.timeout(authorityTimeoutMs),
       });
-    } catch {
+    } catch (error) {
+      req.log.warn({ dependency: "catalog", errorName: error instanceof Error ? error.name : "Unknown" }, "Authority request failed");
       throw new Problem(503, "Catalog unavailable");
     }
-    if (!response.ok) throw new Problem(503, "Catalog unavailable");
+    if (!response.ok) {
+      req.log.warn({ dependency: "catalog", statusCode: response.status }, "Authority rejected request");
+      throw new Problem(503, "Catalog unavailable");
+    }
     const titles = (await response.json()) as { items: unknown[] };
     if (!titles.items.length)
       throw new Problem(404, "Eligible title not found");

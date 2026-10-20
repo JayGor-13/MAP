@@ -2,6 +2,8 @@
 
 Go application with independent `playback-session` and `watch-history` deployment roles selected by `SERVICE_NAME`. Playback owns Redis session state; History owns Cassandra. Both use Kafka with stable event identities.
 
+`AUTHORITY_TIMEOUT_MS` optionally sets the outbound HTTP authority deadline as a positive integer in milliseconds (default: 1000). Local Compose sets both roles to 5000 ms. Unexpected dependency errors are logged server-side; HTTP clients receive a generic 503 response.
+
 ```powershell
 cd member-5-playback
 go test ./...

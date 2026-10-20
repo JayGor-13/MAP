@@ -67,6 +67,10 @@ services:
       KONG_DATABASE: 'off'
       KONG_DECLARATIVE_CONFIG: /etc/kong/kong.yaml
       KONG_ADMIN_LISTEN: 'off'
+      KONG_NGINX_WORKER_PROCESSES: '2'
+      KONG_DNS_VALID_TTL: '5'
+      KONG_DNS_STALE_TTL: '0'
+      KONG_DNS_NOT_FOUND_TTL: '1'
       KONG_PROXY_ACCESS_LOG: /dev/stdout
       KONG_PROXY_ERROR_LOG: /dev/stderr
     volumes: ['./gateway/kong.yaml:/etc/kong/kong.yaml:ro']
@@ -78,9 +82,10 @@ services:
     volumes: [mongo-data:/data/db]
     healthcheck:
       test: [CMD, mongosh, --quiet, --eval, 'db.adminCommand({ping:1}).ok']
-      interval: 5s
-      timeout: 5s
+      interval: 10s
+      timeout: 30s
       retries: 30
+      start_period: 30s
   mongo-init:
     image: mongo:7.0.17
     depends_on:
@@ -144,9 +149,16 @@ services:
       KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     volumes: [kafka-data:/var/lib/kafka/data]
-    healthcheck: {test: [CMD-SHELL, '/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list'], interval: 10s, timeout: 10s, retries: 30}
+    healthcheck:
+      test: [CMD-SHELL, 'KAFKA_HEAP_OPTS="-Xms32m -Xmx128m" /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list']
+      interval: 15s
+      timeout: 60s
+      retries: 30
+      start_period: 60s
   kafka-init:
     image: apache/kafka:3.9.0
+    environment:
+      KAFKA_HEAP_OPTS: -Xms32m -Xmx128m
     depends_on:
       kafka: {condition: service_healthy}
     entrypoint: [/bin/sh, /init/topics.sh]
@@ -182,6 +194,7 @@ services:
     environment:
       <<: *auth
       PORT: 8012
+      AUTHORITY_TIMEOUT_MS: 5000
       MONGO_URL: mongodb://mongo:27017/watchlist?replicaSet=rs0
       PCT_JWKS_FILE: /keys/pct-jwks.json
       CATALOG_URL: http://catalog-read:8022
@@ -258,6 +271,7 @@ services:
       <<: *auth
       SERVICE_NAME: playback-session
       PORT: 8041
+      AUTHORITY_TIMEOUT_MS: 5000
       REDIS_URL: redis://redis-session:6379
       SUBSCRIPTION_URL: http://subscription:8031
       CATALOG_WRITE_URL: http://catalog-write:8021
@@ -275,6 +289,7 @@ services:
       <<: *auth
       SERVICE_NAME: watch-history
       PORT: 8042
+      AUTHORITY_TIMEOUT_MS: 5000
       CASSANDRA_HOSTS: cassandra
     depends_on:
       cassandra: {condition: service_healthy}

@@ -13,6 +13,8 @@ python -m unittest discover -s tests -p "test_*.py"
 
 Build containers with `Dockerfile.node` or `Dockerfile.python`; Member 1's Compose config supplies ports, credentials and dependencies. Node dependencies are locked in `package-lock.json`; Python direct dependencies are pinned in `requirements.txt`.
 
+The Node services accept `AUTHORITY_TIMEOUT_MS` as a positive integer for outbound Profile/Catalog calls (default: 800 ms). Local Compose sets Watchlist to 5000 ms for slower developer machines. Dependency diagnostics log the authority name and error category/status, without authentication headers.
+
 ## Implemented local behavior
 
 - Account bootstrap and account disablement.

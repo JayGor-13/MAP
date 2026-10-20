@@ -1,4 +1,5 @@
-"""Exercise the local stack. Creates and removes only synthetic local test records."""
+"""Exercise the local demo stack; creates test data and cancels alice's live demo subscriptions."""
+import argparse
 import json
 from pathlib import Path
 import time
@@ -13,7 +14,8 @@ API = 'http://localhost:8080'
 
 def call(method, path, body=None, headers=None, expected=(200,), raw=False):
     data = None if body is None else json.dumps(body).encode()
-    req = Request(API + path, data=data, headers={'Content-Type':'application/json', **(headers or {})}, method=method)
+    content_headers = {'Content-Type':'application/json'} if data is not None else {}
+    req = Request(API + path, data=data, headers={**content_headers, **(headers or {})}, method=method)
     try:
         with urlopen(req, timeout=10) as response:
             status, payload = response.status, response.read()
@@ -43,7 +45,7 @@ def eventually(fn, predicate=lambda value: bool(value), seconds=45):
     raise AssertionError(f'Condition did not converge: {last}')
 
 
-def main():
+def main(check_media=False):
     env = dict(line.split('=',1) for line in (ROOT/'.local/dev.env').read_text().splitlines() if '=' in line)
     password = env['DEV_PASSWORD']
     eventually(lambda: call('GET','/plans'),seconds=180)
@@ -59,6 +61,7 @@ def main():
         pct=call('POST','/profiles/'+profile['id']+'/select',{},alice)['token']
         scoped={**alice,'X-Profile-Token':pct}
         call('GET','/catalog/titles',headers={**bob,'X-Profile-Token':pct},expected=(401,403))
+        print('PASS: identity, profile selection and account isolation.',flush=True)
         body={'name':'Synthetic smoke title','genres':['drama'],'maturity':12,'regions':['IN'],'licenseStart':'2020-01-01T00:00:00Z','licenseEnd':'2099-01-01T00:00:00Z','assetPath':'demo/master.m3u8','durationSeconds':10,'maxQuality':'HD'}
         call('POST','/admin/catalog/titles',body,alice,(403,))
         title=call('POST','/admin/catalog/titles',body,admin,(201,))
@@ -69,6 +72,7 @@ def main():
         call('PUT',f"/watchlist/titles/{title['id']}",{},scoped,(204,))
         entries=call('GET','/watchlist',headers=scoped)['items']
         assert sum(e['titleId']==title['id'] for e in entries)==1
+        print('PASS: catalog publication/projection and watchlist deduplication.',flush=True)
         for old in call('GET','/subscriptions',headers=alice)['items']:
             if old['status'] in ('ACTIVE','PENDING'):
                 call('POST',f"/subscriptions/{old['id']}/cancel",{},alice)
@@ -79,18 +83,35 @@ def main():
         assert repeated['id']==subscription['id']
         call('POST','/subscriptions',{'planId':'basic'},idem,(409,))
         eventually(lambda:call('GET','/subscriptions/current',headers=alice),lambda s:s and s['status']=='ACTIVE')
+        print('PASS: billing idempotency, payment reconciliation and ACTIVE entitlement.',flush=True)
         admission={**scoped,'Idempotency-Key':str(uuid4())}
         playback=call('POST','/sessions',{'titleId':title['id']},admission,(201,))
         session_id=playback['session']['sessionId']
         assert call('POST','/sessions',{'titleId':title['id']},admission,(201,))['session']['sessionId']==session_id
+        if check_media:
+            assert playback['url'].startswith(API+'/media/'), 'Expected local signed media URL'
+            media_path=playback['url'][len(API):]
+            manifest=call('GET',media_path,raw=True).decode()
+            assert manifest.startswith('#EXTM3U'), 'Expected an HLS manifest'
+            segments=[line.strip() for line in manifest.splitlines() if line.strip() and not line.startswith('#')]
+            assert segments, 'Manifest contains no media segments'
+            for segment in segments:
+                assert segment.startswith('/media/'), 'Expected a local signed segment path'
+                data=call('GET',segment,raw=True)
+                assert data and data[0]==0x47 and len(data)%188==0, 'Expected MPEG-TS segment bytes'
+            call('GET',media_path.split('?',1)[0],expected=(403,))
+            print('PASS: signed HLS manifest, media segments and unsigned URL rejection.',flush=True)
         call('POST',f'/sessions/{session_id}/heartbeat',{'sequence':1,'positionSeconds':4},scoped)
         call('POST',f'/sessions/{session_id}/heartbeat',{'sequence':1,'positionSeconds':4},scoped,(409,))
         call('POST',f'/sessions/{session_id}/stop',{},scoped)
         call('POST',f'/sessions/{session_id}/stop',{},scoped)
         history=eventually(lambda:call('GET','/history',headers=scoped),lambda h:any(e['sessionId']==session_id for e in h['items']))
         assert sum(e['sessionId']==session_id for e in history['items'])==1
-        recommendations=call('GET','/recommendations/home',headers=scoped)
-        assert 'degraded' in recommendations
+        trending=eventually(lambda:call('GET','/recommendations/trending',headers=scoped),lambda r:not r['degraded'] and any(t['id']==title['id'] for t in r['items']))
+        assert trending['source']=='graph'
+        recommendations=eventually(lambda:call('GET','/recommendations/home',headers=scoped),lambda r:not r['degraded'] and all(t['id']!=title['id'] for t in r['items']))
+        assert recommendations['source']=='graph'
+        print('PASS: playback ordering, history ingestion and graph-backed recommendations.',flush=True)
         invoices=eventually(lambda:call('GET','/invoices',headers=alice),lambda v:any(i['paymentId']==subscription['paymentId'] for i in v['items']))
         invoice=next(i for i in invoices['items'] if i['paymentId']==subscription['paymentId'])
         pdf=call('GET','/invoices/'+quote(invoice['id'],safe='')+'/pdf',headers=alice,raw=True)
@@ -108,4 +129,6 @@ def main():
 
 
 if __name__=='__main__':
-    main()
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--check-media',action='store_true',help='Also fetch signed sample HLS media; run make-demo-media.ps1 first.')
+    main(check_media=parser.parse_args().check_media)
